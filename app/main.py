@@ -1,19 +1,54 @@
+
 import time
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from app import models
 from app.config import settings
 from app.database import Base, engine
-from app.routers import users
+from app.routers import users, auth
 
+
+# Create database tables
 Base.metadata.create_all(bind=engine)
 
+
+# Initialize FastAPI
 app = FastAPI(title=settings.app_name)
 
-app.include_router(users.router)
 
+# ==========================================
+# CORS Middleware
+# ==========================================
+
+origins = [
+    origin.strip()
+    for origin in settings.cors_origins.split(",")
+    if origin.strip()
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ==========================================
+# Register Routers
+# ==========================================
+
+app.include_router(users.router)
+app.include_router(auth.router)
+
+
+# ==========================================
+# Process Time Middleware
+# ==========================================
 
 @app.middleware("http")
 async def process_time_middleware(request: Request, call_next):
@@ -27,6 +62,10 @@ async def process_time_middleware(request: Request, call_next):
     return response
 
 
+# ==========================================
+# Global Exception Handler
+# ==========================================
+
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
     return JSONResponse(
@@ -34,6 +73,10 @@ async def general_exception_handler(request: Request, exc: Exception):
         content={"detail": "Internal server error"}
     )
 
+
+# ==========================================
+# Home Route
+# ==========================================
 
 @app.get("/")
 def home():

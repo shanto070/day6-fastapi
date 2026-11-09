@@ -1,79 +1,94 @@
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app import models, schemas
-from app.dependencies import get_db
-
-router = APIRouter(
-    prefix="/users",
-    tags=["Users"]
+from app.dependencies import (
+    get_db,
+    get_current_user,
+    get_current_admin
 )
 
-
-@router.post("/", response_model=schemas.UserResponse,
-             status_code=status.HTTP_201_CREATED)
-def create_user(user: schemas.UserCreate,
-                db: Session = Depends(get_db)):
-
-    existing_user = db.query(models.User).filter(
-        models.User.email == user.email
-    ).first()
-
-    if existing_user:
-        raise HTTPException(
-            status_code=409,
-            detail="Email already registered"
-        )
-
-    new_user = models.User(**user.model_dump())
-
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-
-    return new_user
+router = APIRouter(prefix="/users", tags=["Users"])
 
 
-@router.get("/", response_model=list[schemas.UserResponse])
-def get_users(db: Session = Depends(get_db)):
+# ==========================================
+# 1. Get Current User Profile
+# ==========================================
+@router.get("/me", response_model=schemas.UserResponse)
+def get_my_profile(
+    current_user: models.User = Depends(get_current_user)
+):
+    return current_user
 
-    return db.query(models.User).all()
+
+# ==========================================
+# 2. Get All Users (Admin Only)
+# ==========================================
+@router.get("/admin/all", response_model=list[schemas.UserResponse])
+def get_all_users(
+    current_admin: models.User = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    users = db.query(models.User).all()
+    return users
 
 
+# ==========================================
+# 3. Get Single User (Admin Only)
+# ==========================================
 @router.get("/{user_id}", response_model=schemas.UserResponse)
-def get_user(user_id: int, db: Session = Depends(get_db)):
-
+def get_user(
+    user_id: int,
+    current_admin: models.User = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
     user = db.query(models.User).filter(
         models.User.id == user_id
     ).first()
 
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
 
     return user
 
 
+# ==========================================
+# 4. Update User (Admin Only)
+# ==========================================
 @router.put("/{user_id}", response_model=schemas.UserResponse)
-def update_user(user_id: int, user_data: schemas.UserUpdate,
-                db: Session = Depends(get_db)):
-
+def update_user(
+    user_id: int,
+    user_data: schemas.UserUpdate,
+    current_admin: models.User = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
     user = db.query(models.User).filter(
         models.User.id == user_id
     ).first()
 
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
 
     update_data = user_data.model_dump(exclude_unset=True)
 
     if "email" in update_data:
-        existing = db.query(models.User).filter(
+        existing_user = db.query(models.User).filter(
             models.User.email == update_data["email"],
             models.User.id != user_id
         ).first()
 
-        if existing:
-            raise HTTPException(status_code=409, detail="Email already registered")
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Email already registered"
+            )
 
     for key, value in update_data.items():
         setattr(user, key, value)
@@ -84,17 +99,35 @@ def update_user(user_id: int, user_data: schemas.UserUpdate,
     return user
 
 
+# ==========================================
+# 5. Delete User (Admin Only)
+# ==========================================
 @router.delete("/{user_id}")
-def delete_user(user_id: int, db: Session = Depends(get_db)):
-
+def delete_user(
+    user_id: int,
+    current_admin: models.User = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
     user = db.query(models.User).filter(
         models.User.id == user_id
     ).first()
 
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    if user.id == current_admin.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Admin cannot delete their own account"
+        )
 
     db.delete(user)
     db.commit()
 
-    return {"message": "User deleted successfully"}
+    return {
+        "message": "User deleted successfully",
+        "user_id": user_id
+    }
