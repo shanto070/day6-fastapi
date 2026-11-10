@@ -1,23 +1,4 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
+# Backward compatibility with Day 7
 
-from app.config import settings
-
-connect_args = (
-    {"check_same_thread": False}
-    if settings.database_url.startswith("sqlite")
-    else {}
-)
-
-engine = create_engine(
-    settings.database_url,
-    connect_args=connect_args
-)
-
-SessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=engine
-)
-
-Base = declarative_base()
+from app.db.base import Base
+from app.db.session import engine, SessionLocal
