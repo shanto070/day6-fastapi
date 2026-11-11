@@ -1,61 +1,7 @@
 
+# API Integration Tests
 
-import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
-
-from app import models
-from app.main import app
-from app.db.base import Base
-from app.dependencies import get_db
-
-
-# Separate in-memory test database
-SQLALCHEMY_DATABASE_URL = "sqlite://"
-
-test_engine = create_engine(
-    SQLALCHEMY_DATABASE_URL,
-    connect_args={"check_same_thread": False},
-    poolclass=StaticPool
-)
-
-TestingSessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=test_engine
-)
-
-
-# Override database dependency
-def override_get_db():
-    db = TestingSessionLocal()
-
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-app.dependency_overrides[get_db] = override_get_db
-
-client = TestClient(app)
-
-
-# Reset database before every test
-@pytest.fixture(autouse=True)
-def reset_database():
-    Base.metadata.drop_all(bind=test_engine)
-    Base.metadata.create_all(bind=test_engine)
-
-    yield
-
-    Base.metadata.drop_all(bind=test_engine)
-
-
-# Test 1: User Registration
-def test_user_registration():
+def test_user_registration(client):
 
     response = client.post(
         "/auth/register",
@@ -72,8 +18,7 @@ def test_user_registration():
     assert "password_hash" not in response.json()
 
 
-# Test 2: Duplicate Email Registration
-def test_duplicate_email_registration():
+def test_duplicate_email_registration(client):
 
     user_data = {
         "name": "Test User",
@@ -82,18 +27,21 @@ def test_duplicate_email_registration():
         "password": "TestPassword123"
     }
 
-    client.post("/auth/register", json=user_data)
-
-    response = client.post(
+    first_response = client.post(
         "/auth/register",
         json=user_data
     )
 
-    assert response.status_code == 409
+    second_response = client.post(
+        "/auth/register",
+        json=user_data
+    )
+
+    assert first_response.status_code == 201
+    assert second_response.status_code == 409
 
 
-# Test 3: User Login
-def test_user_login():
+def test_user_login(client):
 
     client.post(
         "/auth/register",
@@ -118,125 +66,145 @@ def test_user_login():
     assert "access_token" in response.json()
 
 
-# Test 4: Unauthorized Profile Access
-def test_unauthorized_profile_access():
+def test_unauthorized_profile_access(client):
 
     response = client.get("/users/me")
 
     assert response.status_code == 401
 
 
-# Test 5: Authorized Profile Access
-def test_authorized_profile_access():
-
-    client.post(
-        "/auth/register",
-        json={
-            "name": "Profile User",
-            "email": "profile@example.com",
-            "age": 24,
-            "password": "TestPassword123"
-        }
-    )
-
-    login_response = client.post(
-        "/auth/login",
-        data={
-            "username": "profile@example.com",
-            "password": "TestPassword123"
-        }
-    )
-
-    token = login_response.json()["access_token"]
+def test_authorized_profile_access(client, auth_headers):
 
     response = client.get(
         "/users/me",
-        headers={
-            "Authorization": f"Bearer {token}"
-        }
+        headers=auth_headers
     )
 
     assert response.status_code == 200
-    assert response.json()["email"] == "profile@example.com"
+    assert response.json()["email"] == "test@example.com"
 
 
-# Test 6: Normal User Cannot Access Admin Endpoint
-def test_normal_user_admin_access():
-
-    client.post(
-        "/auth/register",
-        json={
-            "name": "Normal User",
-            "email": "normal@example.com",
-            "age": 24,
-            "password": "TestPassword123"
-        }
-    )
-
-    login_response = client.post(
-        "/auth/login",
-        data={
-            "username": "normal@example.com",
-            "password": "TestPassword123"
-        }
-    )
-
-    token = login_response.json()["access_token"]
+def test_normal_user_admin_access(client, auth_headers):
 
     response = client.get(
         "/users/",
-        headers={
-            "Authorization": f"Bearer {token}"
-        }
+        headers=auth_headers
     )
 
     assert response.status_code == 403
 
 
-# Test 7: Admin Can Access Admin Endpoint
-def test_admin_access():
+def test_admin_access(client, admin_headers):
 
-    # Register admin user
-    client.post(
-        "/auth/register",
-        json={
-            "name": "Admin User",
-            "email": "admin-test@example.com",
-            "age": 24,
-            "password": "TestPassword123"
-        }
-    )
-
-    # Change role to admin in test database
-    db = TestingSessionLocal()
-
-    user = db.query(models.User).filter(
-        models.User.email == "admin-test@example.com"
-    ).first()
-
-    user.role = "admin"
-    db.commit()
-    db.close()
-
-    # Login as admin
-    login_response = client.post(
-        "/auth/login",
-        data={
-            "username": "admin-test@example.com",
-            "password": "TestPassword123"
-        }
-    )
-
-    token = login_response.json()["access_token"]
-
-    # Access admin endpoint
     response = client.get(
         "/users/",
-        headers={
-            "Authorization": f"Bearer {token}"
-        }
+        headers=admin_headers
     )
 
     assert response.status_code == 200
     assert len(response.json()) == 1
     assert response.json()[0]["role"] == "admin"
+
+# Additional Authentication and Authorization Tests
+
+def test_invalid_token(client):
+    response = client.get(
+        "/users/me",
+        headers={"Authorization": "Bearer invalid-token"}
+    )
+
+    assert response.status_code == 401
+
+
+def test_inactive_user_cannot_access_profile(
+    client, db_session, test_user
+):
+    test_user.is_active = False
+    db_session.commit()
+
+    response = client.get(
+        "/users/me",
+        headers={
+            "Authorization": "Bearer " +
+            __import__("app.core.security", fromlist=["create_access_token"])
+            .create_access_token({"sub": str(test_user.id)})
+        }
+    )
+
+    assert response.status_code == 401
+
+
+def test_user_cannot_access_admin_endpoint(client, auth_headers):
+    response = client.get(
+        "/users/",
+        headers=auth_headers
+    )
+
+    assert response.status_code == 403
+
+# Test: Home endpoint
+def test_home_endpoint(client):
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "message": "Welcome to Day 8 FastAPI Architecture"
+    }
+
+
+# Test: Process time middleware
+def test_process_time_header(client):
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "X-Process-Time" in response.headers
+    assert float(response.headers["X-Process-Time"]) >= 0
+
+
+# Test: Login with incorrect password
+def test_login_incorrect_password(client, test_user):
+    response = client.post(
+        "/auth/login",
+        data={
+            "username": test_user.email,
+            "password": "WrongPassword123"
+        }
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Incorrect email or password"
+
+
+# Test: Login with unknown email
+def test_login_unknown_email(client):
+    response = client.post(
+        "/auth/login",
+        data={
+            "username": "unknown@example.com",
+            "password": "Password123"
+        }
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Incorrect email or password"
+# Test: Global exception handler
+def test_global_exception_handler(client):
+    from app.main import app
+
+    @app.get("/test-server-error")
+    def trigger_server_error():
+        raise Exception("Test internal error")
+
+    from fastapi.testclient import TestClient
+
+    test_client = TestClient(
+        app,
+        raise_server_exceptions=False
+    )
+
+    response = test_client.get("/test-server-error")
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "detail": "Internal server error"
+    }
